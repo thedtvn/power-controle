@@ -567,6 +567,80 @@ fn execute_cctk_set(
     Ok(())
 }
 
+pub fn set_power_source_modes(
+    cctk_path: &PathBuf,
+    thermal: Option<ThermalProfile>,
+    battery: Option<&BatteryChargeSetting>,
+    credential: Option<&BiosPassword>,
+) -> Result<(Option<ThermalProfile>, Option<BatteryChargeSetting>), DellError> {
+    let mut arguments = Vec::with_capacity(3);
+    if let Some(profile) = thermal {
+        arguments.push(format!("--ThermalManagement={}", profile.cctk_value()));
+    }
+    if let Some(setting) = battery {
+        let value = if setting.mode == BatteryChargeMode::Custom {
+            format!("Custom:{}-{}", setting.custom_start, setting.custom_stop)
+        } else {
+            setting.mode.cctk_value().to_string()
+        };
+        arguments.push(format!("--PrimaryBattChargeCfg={value}"));
+    }
+    if let Some(password) = credential {
+        arguments.push(match password.kind {
+            BiosPasswordKind::Setup => format!("--ValSetupPwd={}", password.password.as_str()),
+            BiosPasswordKind::System => format!("--ValSysPwd={}", password.password.as_str()),
+        });
+    }
+    let refs = arguments.iter().map(String::as_str).collect::<Vec<_>>();
+    let output = run_cctk(cctk_path, &refs)?;
+    debug_cctk("set.power_source.exit", output.status);
+    if !output.status.success() {
+        return classify_set_failure(&output);
+    }
+
+    let response = format!(
+        "{}\n{}",
+        decode_cctk_output(&output.stdout),
+        decode_cctk_output(&output.stderr)
+    );
+    let returned_thermal = thermal.and_then(|_| parse_thermal_output(&response).ok());
+    let returned_battery = battery.and_then(|_| parse_battery_output(&response).ok());
+    debug_cctk(
+        "set.power_source.response",
+        format_args!(
+            "thermal={returned_thermal:?} battery={:?}",
+            returned_battery.as_ref().map(|setting| setting.mode)
+        ),
+    );
+    Ok((
+        returned_thermal.or(thermal),
+        returned_battery.or_else(|| battery.cloned()),
+    ))
+}
+
+fn classify_set_failure<T>(output: &Output) -> Result<T, DellError> {
+    let code = output.status.code().unwrap_or(-1);
+    let message = format!(
+        "{}\n{}",
+        decode_cctk_output(&output.stderr),
+        decode_cctk_output(&output.stdout)
+    );
+    let normalized = message.to_ascii_lowercase();
+    if matches!(code, 58 | 65)
+        || normalized.contains("setup password is required")
+        || normalized.contains("--valsetuppwd")
+    {
+        Err(DellError::SetupPasswordError(format!("exit {code}")))
+    } else if matches!(code, 66 | 67)
+        || normalized.contains("system password is required")
+        || normalized.contains("--valsyspwd")
+    {
+        Err(DellError::SystemPasswordError(format!("exit {code}")))
+    } else {
+        Err(DellError::CommandFailed(format!("exit {code}")))
+    }
+}
+
 /// Sets the thermal management profile via CCTK.
 pub fn set_thermal_profile(
     cctk_path: &PathBuf,

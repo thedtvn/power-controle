@@ -9,8 +9,8 @@ use windows::Win32::System::Power::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
     GetWindowLongPtrW, PostQuitMessage, RegisterClassW, SetWindowLongPtrW, CREATESTRUCTW,
-    GWLP_USERDATA, MSG, REGISTER_NOTIFICATION_FLAGS, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CREATE,
-    WM_DESTROY, WM_POWERBROADCAST, WNDCLASSW,
+    GWLP_USERDATA, MSG, PBT_APMPOWERSTATUSCHANGE, REGISTER_NOTIFICATION_FLAGS, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WM_CREATE, WM_DESTROY, WM_POWERBROADCAST, WNDCLASSW,
 };
 
 const GUID_ACDC_POWER_SOURCE: GUID = GUID::from_u128(0x5d3e9a59_e9d5_4b00_a6bd_ff34ff516548);
@@ -184,7 +184,11 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         WM_POWERBROADCAST => {
-            if wparam.0 as u32 == PBT_POWERSETTINGCHANGE {
+            if wparam.0 as u32 == PBT_APMPOWERSTATUSCHANGE {
+                #[cfg(debug_assertions)]
+                eprintln!("[power-monitor] PBT_APMPOWERSTATUSCHANGE");
+                send_current_power_event(hwnd);
+            } else if wparam.0 as u32 == PBT_POWERSETTINGCHANGE {
                 // SAFETY: When wparam is PBT_POWERSETTINGCHANGE, lparam
                 // points to a valid POWERBROADCAST_SETTING struct allocated
                 // by the system. We only read from it.
@@ -194,7 +198,7 @@ unsafe extern "system" fn wnd_proc(
                     if s.PowerSetting == GUID_ACDC_POWER_SOURCE && s.DataLength >= 4 {
                         // SAFETY: DataLength >= 4 guarantees at least one
                         // u32 is present in the Data field.
-                        let value = *(s.Data.as_ptr() as *const u32);
+                        let value = std::ptr::read_unaligned(s.Data.as_ptr().cast::<u32>());
                         let event = match value {
                             0 => PowerEvent::AcConnected,
                             1 => PowerEvent::BatteryActive,
@@ -208,6 +212,8 @@ unsafe extern "system" fn wnd_proc(
                         let sender_ptr =
                             GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const Sender<PowerEvent>;
                         if !sender_ptr.is_null() {
+                            #[cfg(debug_assertions)]
+                            eprintln!("[power-monitor] GUID_ACDC_POWER_SOURCE value={value}");
                             let _ = (*sender_ptr).send(event);
                         }
                     }
@@ -220,5 +226,25 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+unsafe fn send_current_power_event(hwnd: HWND) {
+    let Some(status) = crate::power::query_power_status() else {
+        return;
+    };
+    let event = match status.ACLineStatus {
+        0 => PowerEvent::BatteryActive,
+        1 => PowerEvent::AcConnected,
+        _ => return,
+    };
+    let sender_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const Sender<PowerEvent>;
+    if !sender_ptr.is_null() {
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "[power-monitor] GetSystemPowerStatus ACLineStatus={}",
+            status.ACLineStatus
+        );
+        let _ = (*sender_ptr).send(event);
     }
 }

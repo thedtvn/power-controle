@@ -88,20 +88,42 @@ async fn cmd_save_config(
         if config.power.auto_switch {
             apply_power_for_current_source(&config.power);
         }
-        if let Some(ref thermal) = config.thermal {
-            if thermal.auto_switch {
-                apply_thermal_for_current_source(thermal, cctk_path.as_ref())?;
+        let source = power::power_source_str(&power::query_power_status());
+        let thermal = config.thermal.as_ref().and_then(|setting| {
+            setting.auto_switch.then_some(match source.as_str() {
+                "ac" => setting.on_ac,
+                "battery" => setting.on_battery,
+                _ => return None,
+            })
+        });
+        let battery = config.battery.as_ref().and_then(|setting| {
+            setting.auto_switch.then_some(match source.as_str() {
+                "ac" => setting.on_ac.clone(),
+                "battery" => setting.on_battery.clone(),
+                _ => return None,
+            })
+        });
+        if let Some(ref cctk) = cctk_path {
+            let credential = bios_pwd::get_bios_password().map_err(|e| e.to_string())?;
+            let (thermal_result, battery_result) =
+                dell::set_power_source_modes(cctk, thermal, battery.as_ref(), credential.as_ref())
+                    .map_err(|e| e.to_string())?;
+            let state = worker_app.state::<AppState>();
+            let mut cached = state
+                .dell_state
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            if let Some(value) = thermal_result {
+                cached.current_profile = Some(value);
             }
-        }
-        if let Some(ref battery) = config.battery {
-            if battery.auto_switch {
-                apply_battery_for_current_source(battery, cctk_path.as_ref())?;
+            if let Some(value) = battery_result {
+                cached.current_battery_mode = Some(value);
             }
+            *state.dell_state.write().unwrap_or_else(|e| e.into_inner()) = cached.clone();
+            let _ = worker_app.emit("thermal-changed", cached.clone());
+            let _ = worker_app.emit("battery-setting-changed", cached);
         }
-        let state = worker_app.state::<AppState>();
-        let dell_state = refresh_dell_state(&state);
-        let _ = worker_app.emit("thermal-changed", dell_state.clone());
-        let _ = worker_app.emit("battery-setting-changed", dell_state);
         update_tray(&worker_app);
         Ok::<(), String>(())
     })
@@ -167,9 +189,14 @@ fn cmd_set_thermal_profile(
 
     let cred = bios_pwd::get_bios_password().map_err(|e| e.to_string())?;
     dell::set_thermal_profile(cctk, profile, cred.as_ref()).map_err(|e| e.to_string())?;
-
     drop(cctk_guard);
-    let dell_state = refresh_dell_state(&state);
+    let mut dell_state = state
+        .dell_state
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    dell_state.current_profile = Some(profile);
+    *state.dell_state.write().unwrap_or_else(|e| e.into_inner()) = dell_state.clone();
     update_tray(&app);
     let _ = app.emit("thermal-changed", dell_state);
     Ok(())
@@ -191,9 +218,14 @@ fn cmd_set_battery_charge_setting(
 
     let cred = bios_pwd::get_bios_password().map_err(|e| e.to_string())?;
     dell::set_battery_charge_setting(cctk, &validated, cred.as_ref()).map_err(|e| e.to_string())?;
-
     drop(cctk_guard);
-    let dell_state = refresh_dell_state(&state);
+    let mut dell_state = state
+        .dell_state
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    dell_state.current_battery_mode = Some(validated);
+    *state.dell_state.write().unwrap_or_else(|e| e.into_inner()) = dell_state.clone();
     update_tray(&app);
     let _ = app.emit("battery-setting-changed", dell_state);
     Ok(())
@@ -663,6 +695,8 @@ fn start_power_monitor(app: AppHandle) {
 
     std::thread::spawn(move || {
         while let Ok(event) = rx.recv() {
+            #[cfg(debug_assertions)]
+            eprintln!("[power-monitor] received {event:?}");
             let state = app.state::<AppState>();
             let cfg = match state.config.lock() {
                 Ok(c) => c.clone(),
@@ -686,63 +720,64 @@ fn start_power_monitor(app: AppHandle) {
                 .unwrap_or_else(|e| e.into_inner())
                 .clone();
 
-            if let Some(ref battery) = cfg.battery {
-                if battery.auto_switch {
-                    let setting = match event {
-                        PowerEvent::AcConnected => Some(&battery.on_ac),
-                        PowerEvent::BatteryActive => Some(&battery.on_battery),
-                        PowerEvent::ShortTermPower => None,
-                    };
-                    if let (Some(s), Some(ref cctk)) = (setting, &cctk_snapshot) {
-                        if let Ok(validated) =
-                            BatteryChargeSetting::new(s.mode, s.custom_start, s.custom_stop)
-                        {
-                            if let Ok(cred) = bios_pwd::get_bios_password() {
-                                if dell::set_battery_charge_setting(cctk, &validated, cred.as_ref())
-                                    .is_ok()
-                                {
-                                    let dell_state = refresh_dell_state(&state);
-                                    let _ = app.emit("battery-setting-changed", dell_state);
+            let thermal_mode = cfg.thermal.as_ref().and_then(|thermal| {
+                thermal.auto_switch.then_some(match event {
+                    PowerEvent::AcConnected => thermal.on_ac,
+                    PowerEvent::BatteryActive => thermal.on_battery,
+                    PowerEvent::ShortTermPower => return None,
+                })
+            });
+            let battery_setting = cfg.battery.as_ref().and_then(|battery| {
+                battery.auto_switch.then_some(match event {
+                    PowerEvent::AcConnected => battery.on_ac.clone(),
+                    PowerEvent::BatteryActive => battery.on_battery.clone(),
+                    PowerEvent::ShortTermPower => return None,
+                })
+            });
+
+            if let Some(ref cctk) = cctk_snapshot {
+                match bios_pwd::get_bios_password() {
+                    Ok(credential) => {
+                        match dell::set_power_source_modes(
+                            cctk,
+                            thermal_mode,
+                            battery_setting.as_ref(),
+                            credential.as_ref(),
+                        ) {
+                            Ok((thermal, battery)) => {
+                                let mut cached = state
+                                    .dell_state
+                                    .read()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .clone();
+                                if let Some(thermal) = thermal {
+                                    cached.current_profile = Some(thermal);
                                 }
+                                if let Some(battery) = battery {
+                                    cached.current_battery_mode = Some(battery);
+                                }
+                                *state.dell_state.write().unwrap_or_else(|e| e.into_inner()) =
+                                    cached.clone();
+                                let _ = app.emit("thermal-changed", cached.clone());
+                                let _ = app.emit("battery-setting-changed", cached);
+                            }
+                            Err(error) => {
+                                open_password_prompt_for_error(&app, &error);
+                                let _ = app.emit("cctk-action-failed", error.to_string());
                             }
                         }
+                    }
+                    Err(error) => {
+                        let _ = app.emit("cctk-action-failed", error.to_string());
                     }
                 }
             }
 
-            if let Some(ref thermal) = cfg.thermal {
-                if thermal.auto_switch {
-                    let profile = match event {
-                        PowerEvent::AcConnected => Some(thermal.on_ac),
-                        PowerEvent::BatteryActive => Some(thermal.on_battery),
-                        PowerEvent::ShortTermPower => None,
-                    };
-                    if let Some(p) = profile {
-                        if let Some(ref cctk) = cctk_snapshot {
-                            match bios_pwd::get_bios_password() {
-                                Ok(cred) => {
-                                    if let Err(e) =
-                                        dell::set_thermal_profile(cctk, p, cred.as_ref())
-                                    {
-                                        eprintln!("Failed to apply thermal profile on event: {e}");
-                                    }
-                                }
-                                Err(e) => eprintln!("Failed to retrieve BIOS credential: {e}"),
-                            }
-                        }
-                    }
-                }
-            }
-
-            let dell_state = if cctk_snapshot.is_some() {
-                refresh_dell_state(&state)
-            } else {
-                state
-                    .dell_state
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .clone()
-            };
+            let dell_state = state
+                .dell_state
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
             update_tray(&app);
             let _ = app.emit("status-changed", power::current_status());
             let _ = app.emit("thermal-changed", dell_state);
