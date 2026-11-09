@@ -1,0 +1,6 @@
+[workspace]
+members = ["src-tauri"]
+resolver = "2"
+
+# The historical src-tauri directory now contains the native GPUI application.
+# Keeping its location preserves existing paths while the framework is replaced.

@@ -1,6 +1,0 @@
-import { Button, FormControl, FormLabel, Input, Stack, Text, useToast } from "@chakra-ui/react";
-import { useState } from "react";
-import { Frame } from "./components";
-import { emit, getCurrentWindow, invoke } from "./tauri";
-
-export function BiosPasswordApp() { const kind = new URLSearchParams(location.search).get("kind") || "setup"; const [password, setPassword] = useState(""); const [saving, setSaving] = useState(false); const toast = useToast(); const save = async () => { setSaving(true); try { await invoke("cmd_set_bios_password", { kind, password }); await emit("bios-password-saved", { kind }); await getCurrentWindow().close(); } catch (error) { toast({ status: "error", title: "Could not save password", description: String(error) }); } finally { setSaving(false); } }; return <Frame title="BIOS Password Required"><Stack p="5" spacing="4"><Text fontSize="lg" fontWeight="bold">BIOS Password Required</Text><Text color="gray.600">Enter the Dell BIOS {kind === "system" ? "System" : "Setup"} password to apply the change.</Text><FormControl><FormLabel>Password</FormLabel><Input autoFocus type="password" value={password} onChange={e => setPassword(e.target.value)} onKeyDown={e => e.key === "Enter" && save()} /></FormControl><Button isLoading={saving} onClick={save}>Save Password</Button></Stack></Frame>; }

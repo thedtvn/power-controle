@@ -11,7 +11,6 @@ permissions:
 jobs:
   build-and-release:
     runs-on: windows-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -22,20 +21,97 @@ jobs:
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Test native application
+        run: cargo test --locked --lib
+
+      - name: Test startup migration without changing system settings
+        shell: powershell
+        run: powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File src-tauri/tests/startup.Tests.ps1
+
+      - name: Build native GPUI release
+        run: cargo build --release --locked
+
+      - name: Read application version
+        id: version
+        shell: pwsh
+        run: |
+          $metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          $version = ($metadata.packages | Where-Object name -eq 'power-controle').version
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "MSI requires a numeric x.y.z version, got '$version'" }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Build setup EXE (NSIS)
+        shell: pwsh
+        run: |
+          $makensis = "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
+          if (!(Test-Path $makensis)) {
+            choco install nsis -y --no-progress
+            if ($LASTEXITCODE -ne 0) { throw 'NSIS installation failed' }
+          }
+          & $makensis "/DVERSION=${{ steps.version.outputs.version }}" installer/power-control.nsi
+          if ($LASTEXITCODE -ne 0) { throw "makensis failed with exit code $LASTEXITCODE" }
+
+      - name: Build MSI (WiX)
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 5.0.2
+          if ($LASTEXITCODE -ne 0) { throw 'WiX installation failed' }
+          $version = '${{ steps.version.outputs.version }}'
+          wix build installer/power-control.wxs -arch x64 `
+            -d "Version=$version" `
+            -d "ExePath=$PWD\target\release\power-controle.exe" `
+            -d "IconPath=$PWD\src-tauri\icons\icon.ico" `
+            -o "target\release\Power-Control-$version-x64.msi"
+          if ($LASTEXITCODE -ne 0) { throw "wix build failed with exit code $LASTEXITCODE" }
+
+      - name: Prepare release assets
+        id: assets
+        shell: pwsh
+        run: |
+          $version = '${{ steps.version.outputs.version }}'
+          $portable = "target\release\Power-Control-$version-x64-portable.exe"
+          Copy-Item target\release\power-controle.exe $portable
+          $files = @(
+            "target\release\Power-Control-$version-x64.msi",
+            "target\release\Power-Control-$version-x64-setup.exe",
+            $portable
+          )
+          foreach ($file in $files) { if (!(Test-Path $file)) { throw "Missing release asset: $file" } }
+          $checksums = foreach ($file in $files) {
+            $hash = (Get-FileHash $file -Algorithm SHA256).Hash.ToLower()
+            "$hash  $(Split-Path $file -Leaf)"
+          }
+          $checksums | Set-Content -Encoding ascii target\release\SHA256SUMS.txt
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
         with:
-          node-version: lts/*
+          name: power-control-${{ steps.version.outputs.version }}-build.${{ github.run_number }}
+          path: |
+            target/release/Power-Control-*.msi
+            target/release/Power-Control-*-setup.exe
+            target/release/Power-Control-*-portable.exe
+            target/release/SHA256SUMS.txt
+          if-no-files-found: error
 
-      - name: Install frontend dependencies
-        run: npm install
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}-build.${{ github.run_number }}
+          name: v${{ steps.version.outputs.version }}-build.${{ github.run_number }}
+          target_commitish: ${{ github.sha }}
+          fail_on_unmatched_files: true
+          files: |
+            target/release/Power-Control-*.msi
+            target/release/Power-Control-*-setup.exe
+            target/release/Power-Control-*-portable.exe
+            target/release/SHA256SUMS.txt
+          body: |
+            Native GPUI Windows build of Power Control.
 
-      - name: Build and release with tauri-action
-        uses: tauri-apps/tauri-action@v0
+            - **MSI** or **setup EXE**: per-machine install under Program Files (recommended; required for elevated Start with Windows). Use one installer type, not both.
+            - **Portable EXE**: runs anywhere, but Start with Windows is refused outside Program Files for security.
+
+            Quit the running app from its tray menu before upgrading. Verify downloads with SHA256SUMS.txt.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tagName: v__VERSION__-build.${{ github.run_number }}
-          releaseName: v__VERSION__-build.${{ github.run_number }}
-          releaseDraft: false
-          prerelease: false

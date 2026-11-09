@@ -1,0 +1,36 @@
+<!-- WiX v5 per-machine MSI. Program Files is required for elevated startup. -->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="Power Control" Manufacturer="duong" Version="$(var.Version)"
+           UpgradeCode="6F1D3C52-8E0B-4A7A-9C55-2B7E4D9A1F30" Scope="perMachine">
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Power Control is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="AppIcon" SourceFile="$(var.IconPath)" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Power Control">
+        <Component Id="MainExecutable">
+          <File Id="PowerControlExe" Source="$(var.ExePath)" Name="power-controle.exe" KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="AppMenuFolder" Name="Power Control">
+        <Component Id="StartMenuShortcut">
+          <Shortcut Id="PowerControlShortcut" Name="Power Control"
+                    Target="[INSTALLFOLDER]power-controle.exe" WorkingDirectory="INSTALLFOLDER" />
+          <RemoveFolder Id="RemoveAppMenuFolder" On="uninstall" />
+          <RegistryValue Root="HKLM" Key="Software\PowerControl" Name="StartMenuShortcut"
+                         Type="integer" Value="1" KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="Main" Title="Power Control">
+      <ComponentRef Id="MainExecutable" />
+      <ComponentRef Id="StartMenuShortcut" />
+    </Feature>
+  </Package>
+</Wix>

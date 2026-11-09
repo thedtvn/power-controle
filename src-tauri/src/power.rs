@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use std::{mem, ptr};
-use tauri::image::Image;
 use windows::core::GUID;
 use windows::Win32::Foundation::HLOCAL;
 use windows::Win32::System::Power::{
@@ -67,25 +66,18 @@ impl PowerScheme {
         Self::ALL.iter().find(|s| s.guid() == guid).copied()
     }
 
-    /// Returns the tray icon for this power scheme.
-    ///
-    /// Uses `expect` because the PNG bytes are embedded at compile time via
-    /// `include_bytes!` — if they are invalid, the build itself is broken.
-    pub fn icon(&self) -> Image<'static> {
-        let bytes: &[u8] = match self {
+    /// Embedded PNG data; the native tray adapter owns image decoding.
+    pub fn icon(&self) -> &'static [u8] {
+        match self {
             Self::Balanced => include_bytes!("../icons/tray_balanced.png"),
             Self::HighPerformance => include_bytes!("../icons/tray_high_performance.png"),
             Self::PowerSaver => include_bytes!("../icons/tray_power_saver.png"),
-        };
-        // SAFETY rationale for expect: bytes are compile-time constants from
-        // valid PNG files. Failure here means a corrupted build artifact.
-        Image::from_bytes(bytes).expect("embedded icon is valid PNG")
+        }
     }
 }
 
-pub fn loading_icon() -> Image<'static> {
-    Image::from_bytes(include_bytes!("../icons/tray_loading.png"))
-        .expect("embedded loading icon is valid PNG")
+pub fn loading_icon() -> &'static [u8] {
+    include_bytes!("../icons/tray_loading.png")
 }
 
 // ---------------------------------------------------------------------------

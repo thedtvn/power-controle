@@ -209,7 +209,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bios_password_kind_deserializes_from_tauri_payload() {
+    fn bios_password_kind_deserializes_from_settings_payload() {
         assert_eq!(
             serde_json::from_str::<BiosPasswordKind>("\"setup\"").ok(),
             Some(BiosPasswordKind::Setup)

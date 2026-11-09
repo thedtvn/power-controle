@@ -1,17 +1,14 @@
 fn main() {
-    #[cfg(target_os = "windows")]
+    println!("cargo:rerun-if-changed=icons/icon.ico");
+    // Only the application icon is embedded here. gpui-component enables GPUI's
+    // default `windows-manifest` feature, which already embeds the executable's
+    // only allowed manifest (DPI awareness + common controls). A second manifest
+    // fails to link (CVT1100), so administrator rights are requested at runtime
+    // instead; see src/elevation.rs.
+    #[cfg(windows)]
     {
-        if std::env::var("PROFILE").unwrap_or_default() == "release" {
-            let windows = tauri_build::WindowsAttributes::new()
-                .app_manifest(include_str!("windows/app.manifest"));
-            let attrs = tauri_build::Attributes::new().windows_attributes(windows);
-            tauri_build::try_build(attrs).expect("failed to run tauri-build");
-        } else {
-            tauri_build::build();
-        }
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        tauri_build::build();
+        let mut resource = winresource::WindowsResource::new();
+        resource.set_icon("icons/icon.ico");
+        resource.compile().expect("could not embed Windows app resources");
     }
 }

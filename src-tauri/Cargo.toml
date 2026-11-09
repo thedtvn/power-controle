@@ -1,21 +1,24 @@
 [package]
 name = "power-controle"
 version = "0.1.0"
-description = "System tray power plan controller"
+description = "Native GPUI Windows power and Dell battery controller"
 authors = ["you"]
 edition = "2021"
 
 [lib]
 name = "power_controle_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+winresource = "0.1"
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon", "image-png"] }
-tauri-plugin-autostart = "2"
-tauri-plugin-single-instance = "2"
+gpui = { version = "=0.2.2", default-features = false }
+gpui-component = { version = "=0.5.1", default-features = false }
+gpui-component-assets = "=0.5.1"
+tray-icon = "0.21"
+anyhow = "1"
+smol = "2"
+image = { version = "0.25", default-features = false, features = ["png"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 zeroize = { version = "1.8", features = ["zeroize_derive"] }
@@ -27,6 +30,9 @@ windows = { version = "0.61", features = [
     "Win32_System_Registry",
     "Win32_System_LibraryLoader",
     "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_Security",
     "Win32_Security_Credentials",
+    "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
