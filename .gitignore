@@ -1,17 +1,28 @@
-# Rust build output
+# Rust build output (workspace builds go to /target)
 /target/
-/src-tauri/target/
+**/target/
+
+# Installer outputs built outside target/
+*.msi
+*.msix
+/installer/*.exe
 
 # Logs
 *.log
 
-# Editors and OS files
+# Editors and IDEs
 .vscode/*
 !.vscode/extensions.json
-.idea
-.DS_Store
+.idea/
+.vs/
 *.suo
+*.user
 *.sw?
 
-# Local orchestration scratch
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local scratch
 /.omo/

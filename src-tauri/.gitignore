@@ -1,4 +1,0 @@
-# Cargo build output (workspace builds use ../target)
-/target/
-# Historical generated schemas are not used by GPUI.
-/gen/
