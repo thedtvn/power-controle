@@ -39,6 +39,10 @@ jobs:
           $version = ($metadata.packages | Where-Object name -eq 'power-controle').version
           if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "MSI requires a numeric x.y.z version, got '$version'" }
           "version=$version" >> $env:GITHUB_OUTPUT
+          # Release tag: v<version>-<short commit id>, e.g. v0.1.0-527756a
+          $short = '${{ github.sha }}'.Substring(0, 7)
+          "short_sha=$short" >> $env:GITHUB_OUTPUT
+          "tag=v$version-$short" >> $env:GITHUB_OUTPUT
 
       - name: Build setup EXE (NSIS)
         shell: pwsh
@@ -86,7 +90,7 @@ jobs:
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: power-control-${{ steps.version.outputs.version }}-build.${{ github.run_number }}
+          name: power-control-${{ steps.version.outputs.tag }}
           path: |
             target/release/Power-Control-*.msi
             target/release/Power-Control-*-setup.exe
@@ -97,8 +101,8 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ steps.version.outputs.version }}-build.${{ github.run_number }}
-          name: v${{ steps.version.outputs.version }}-build.${{ github.run_number }}
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ${{ steps.version.outputs.tag }}
           target_commitish: ${{ github.sha }}
           fail_on_unmatched_files: true
           files: |

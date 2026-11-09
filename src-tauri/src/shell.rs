@@ -1,45 +1,29 @@
+//! Process roles.
+//!
+//! * **Tray** (default): lightweight background process. Owns the tray icon,
+//!   the hardware service, and its cache. It runs a plain Win32 message loop
+//!   with no GPU renderer and no windows — nothing transparent can appear.
+//! * **Settings** (`--settings`): a separate GPUI process. It reads the tray's
+//!   cached state over IPC, and fully exits when its window closes, releasing
+//!   all UI memory instead of hiding.
 use crate::dell::{BatteryChargeMode, BatteryChargeSetting, ThermalProfile};
 use crate::instance::Instance;
 use crate::power::PowerScheme;
 use crate::service::{Action, Service, Snapshot};
 use anyhow::Result;
-use gpui::{
-    div, px, size, App, AppContext as _, Application, Bounds, Context, IntoElement, Render, Window,
-    WindowBounds, WindowHandle, WindowKind, WindowOptions,
-};
-use gpui_component::Root;
-use std::time::Duration;
+use std::os::windows::process::CommandExt;
+use std::process::{Child, Command};
+use std::time::{Duration, Instant};
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
-use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
+use tray_icon::{Icon, MouseButton, TrayIcon, TrayIconBuilder, TrayIconEvent};
+use windows::Win32::UI::WindowsAndMessaging::{
+    DispatchMessageW, GetMessageW, KillTimer, PostQuitMessage, SetTimer, TranslateMessage, MSG,
+    WM_TIMER,
+};
 
-/// Invisible keep-alive window. GPUI 0.2.2 on Windows posts WM_QUIT when its
-/// last window closes, which would kill this tray app whenever Settings is
-/// closed. This never-shown tool window (no taskbar button) keeps it alive.
-struct KeepAlive;
-impl Render for KeepAlive {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-    }
-}
+const SETTINGS_ARG: &str = "--settings";
 
-fn open_keep_alive(cx: &mut App) -> Result<()> {
-    let options = WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(Bounds::new(
-            gpui::point(px(-32000.), px(-32000.)),
-            size(px(1.), px(1.)),
-        ))),
-        titlebar: None,
-        focus: false,
-        show: false,
-        kind: WindowKind::PopUp,
-        is_movable: false,
-        is_resizable: false,
-        is_minimizable: false,
-        ..Default::default()
-    };
-    cx.open_window(options, |_, cx| cx.new(|_| KeepAlive))?;
-    Ok(())
-}
+// ------------------------------------------------------------------ tray ----
 
 fn icon(bytes: &[u8]) -> Result<Icon> {
     let image = image::load_from_memory(bytes)?.into_rgba8();
@@ -49,17 +33,17 @@ fn icon(bytes: &[u8]) -> Result<Icon> {
 
 fn menu(snapshot: &Snapshot) -> Result<Menu> {
     let menu = Menu::new();
-    let title = MenuItem::new(
+    let header = if snapshot.loaded {
         format!(
             "{} · {}% · {}",
             snapshot.status.active_scheme.label(),
             snapshot.status.battery_percent,
             snapshot.status.power_source
-        ),
-        false,
-        None,
-    );
-    menu.append(&title)?;
+        )
+    } else {
+        format!("{} · loading…", snapshot.status.active_scheme.label())
+    };
+    menu.append(&MenuItem::new(header, false, None))?;
     menu.append(&PredefinedMenuItem::separator())?;
     for scheme in PowerScheme::ALL {
         menu.append(&CheckMenuItem::with_id(
@@ -109,45 +93,50 @@ fn menu(snapshot: &Snapshot) -> Result<Menu> {
     Ok(menu)
 }
 
-struct Shell {
+struct Tray {
     service: Service,
     instance: Instance,
     tray: TrayIcon,
-    settings: Option<WindowHandle<Root>>,
+    settings: Option<Child>,
     revision: u64,
     prompt_visible: bool,
+    menu_key: Option<String>,
+    icon_scheme: Option<PowerScheme>,
 }
-impl Shell {
-    fn open_settings(&mut self, cx: &mut App) {
-        if let Some(handle) = self.settings {
-            if handle
-                .update(cx, |_, window, _| window.activate_window())
-                .is_ok()
-            {
-                cx.activate(true);
+
+impl Tray {
+    /// Launches Settings as its own process, or does nothing if it is open.
+    /// A second Settings launch focuses the existing window itself.
+    fn open_settings(&mut self) {
+        if let Some(child) = &mut self.settings {
+            if matches!(child.try_wait(), Ok(None)) {
+                // Still running: ask it to come to the foreground by
+                // launching a second copy, which hands off and exits.
+                let _ = spawn_settings();
                 return;
             }
         }
-        match crate::ui::open_settings(self.service.clone(), cx) {
-            Ok(handle) => {
-                self.settings = Some(handle);
-                cx.activate(true);
-            }
-            Err(error) => eprintln!("Could not open Settings: {error}"),
-        }
+        self.settings = spawn_settings().ok();
     }
-    fn tick(&mut self, cx: &mut App) {
+
+    fn tick(&mut self) -> bool {
         if self.instance.take_activation() {
-            self.open_settings(cx);
+            self.open_settings();
+        }
+        while let Ok(event) = TrayIconEvent::receiver().try_recv() {
+            if let TrayIconEvent::DoubleClick {
+                button: MouseButton::Left,
+                ..
+            } = event
+            {
+                self.open_settings();
+            }
         }
         while let Ok(event) = MenuEvent::receiver().try_recv() {
             let id = event.id.as_ref();
             match id {
-                "settings" => self.open_settings(cx),
-                "quit" => {
-                    cx.quit();
-                    return;
-                }
+                "settings" => self.open_settings(),
+                "quit" => return false,
                 _ => {
                     if let Some(scheme) = PowerScheme::from_id(id) {
                         self.service.submit(Action::SetScheme(scheme));
@@ -161,134 +150,200 @@ impl Shell {
                 }
             }
         }
+        // Reap a closed Settings process so it never lingers as a zombie.
+        if let Some(child) = &mut self.settings {
+            if !matches!(child.try_wait(), Ok(None)) {
+                self.settings = None;
+            }
+        }
         let snapshot = self.service.snapshot();
         if snapshot.revision != self.revision {
             self.revision = snapshot.revision;
-            if let Ok(menu) = menu(&snapshot) {
-                self.tray.set_menu(Some(Box::new(menu)));
-            }
-            if let Ok(icon) = icon(snapshot.status.active_scheme.icon()) {
-                let _ = self.tray.set_icon(Some(icon));
-            }
-            let _ = self.tray.set_tooltip(Some(format!(
-                "Power Control — {} · {}%",
-                snapshot.status.active_scheme.label(),
-                snapshot.status.battery_percent
-            )));
+            self.refresh_tray(&snapshot);
         }
         let prompt = snapshot.password_prompt.is_some() || snapshot.warning.is_some();
         if prompt && !self.prompt_visible {
-            self.open_settings(cx);
+            self.open_settings();
         }
         self.prompt_visible = prompt;
+        true
+    }
+
+    /// Rebuilds the native menu only when its visible content changed; the
+    /// snapshot revision also bumps for busy/message updates.
+    fn refresh_tray(&mut self, snapshot: &Snapshot) {
+        let key = format!(
+            "{:?}|{}|{}|{}|{}|{:?}|{:?}|{:?}|{:?}",
+            snapshot.status.active_scheme,
+            snapshot.status.battery_percent,
+            snapshot.status.power_source,
+            snapshot.busy,
+            snapshot.loaded,
+            snapshot.dell.current_profile,
+            snapshot.dell.current_battery_mode.as_ref().map(|s| s.mode),
+            snapshot.dell.supported_profiles,
+            snapshot.dell.supported_battery_modes,
+        );
+        if self.menu_key.as_deref() != Some(key.as_str()) {
+            if let Ok(menu) = menu(snapshot) {
+                self.tray.set_menu(Some(Box::new(menu)));
+            }
+            self.menu_key = Some(key);
+        }
+        if self.icon_scheme != Some(snapshot.status.active_scheme) {
+            if let Ok(icon) = icon(snapshot.status.active_scheme.icon()) {
+                let _ = self.tray.set_icon(Some(icon));
+            }
+            self.icon_scheme = Some(snapshot.status.active_scheme);
+        }
+        let _ = self.tray.set_tooltip(Some(format!(
+            "Power Control — {} · {}%",
+            snapshot.status.active_scheme.label(),
+            snapshot.status.battery_percent
+        )));
     }
 }
 
-pub fn run() -> Result<()> {
-    let autostart = std::env::args().any(|arg| arg == "--autostart");
-    // Safe native launch check: no worker, power writes, credential changes, or
-    // startup migration. The temporary window closes automatically.
-    let smoke_test = std::env::args().any(|arg| arg == "--smoke-test");
-    // Release builds need administrator rights for Dell CCTK, but GPUI owns the
-    // executable manifest, so elevate at runtime. This runs before taking the
-    // single-instance mutex so the elevated copy can acquire it.
-    if !cfg!(debug_assertions) && !smoke_test && !crate::elevation::is_elevated() {
-        let args: Vec<String> = std::env::args().skip(1).collect();
-        if crate::elevation::relaunch_elevated(&args) {
-            return Ok(());
-        }
-    }
+fn spawn_settings() -> std::io::Result<Child> {
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    Command::new(std::env::current_exe()?)
+        .arg(SETTINGS_ARG)
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+}
+
+fn run_tray(autostart: bool, smoke_test: bool) -> Result<()> {
     let Some(instance) = Instance::acquire(autostart || smoke_test)? else {
         return Ok(());
     };
     let service = Service::new().map_err(anyhow::Error::msg)?;
+    // The pipe must be listening before Settings can be opened.
+    crate::ipc::serve(service.clone());
+    let snapshot = service.snapshot();
+    let tray = TrayIconBuilder::new()
+        .with_icon(icon(crate::power::loading_icon())?)
+        .with_tooltip("Power Control — Loading…")
+        .with_menu(Box::new(menu(&snapshot)?))
+        .with_menu_on_left_click(true)
+        .build()?;
+    let mut state = Tray {
+        service: service.clone(),
+        instance,
+        tray,
+        settings: None,
+        revision: u64::MAX,
+        prompt_visible: false,
+        menu_key: None,
+        icon_scheme: None,
+    };
+    if !smoke_test {
+        // Load all hardware state once, in the background; the tray already
+        // shows the cached state from the last run.
+        service.start();
+    }
+    // Scheduled login stays tray-only; a deliberate manual launch opens
+    // Settings right away.
+    if !autostart && !smoke_test {
+        state.open_settings();
+    }
+
+    // Plain Win32 loop: tray-icon/muda deliver clicks through window messages,
+    // and a 150 ms timer polls cached state. No GPU, no hidden windows.
+    let started = Instant::now();
+    unsafe {
+        let timer = SetTimer(None, 0, 150, None);
+        let mut msg = MSG::default();
+        while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+            if msg.message == WM_TIMER && msg.hwnd.is_invalid() {
+                let keep = state.tick();
+                if !keep || (smoke_test && started.elapsed() > Duration::from_secs(2)) {
+                    PostQuitMessage(0);
+                }
+                continue;
+            }
+            let _ = TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        let _ = KillTimer(None, timer);
+    }
+    if let Some(mut child) = state.settings.take() {
+        let _ = child.kill();
+    }
+    Ok(())
+}
+
+// -------------------------------------------------------------- settings ----
+
+fn run_settings(smoke_test: bool) -> Result<()> {
+    use gpui::Application;
+
+    // Only one Settings window: a second launch focuses the first and exits.
+    let Some(_guard) = crate::instance::SettingsGuard::acquire()? else {
+        return Ok(());
+    };
+    // Snapshot comes from the tray's cache: no hardware queries here, so the
+    // window opens with complete data immediately.
+    let service = crate::settings_client::Service::connect()?;
     Application::new()
         .with_assets(gpui_component_assets::Assets)
         .run(move |cx| {
             gpui_component::init(cx);
-            let snapshot = service.snapshot();
-            let tray = icon(crate::power::loading_icon()).and_then(|icon| {
-                Ok(TrayIconBuilder::new()
-                    .with_icon(icon)
-                    .with_tooltip("Power Control — Loading…")
-                    .with_menu(Box::new(menu(&snapshot)?))
-                    .with_menu_on_left_click(true)
-                    .build()?)
-            });
-            let tray = match tray {
-                Ok(tray) => tray,
+            let handle = match crate::ui::open_settings(service, cx) {
+                Ok(handle) => handle,
                 Err(error) => {
-                    eprintln!("Could not create the tray: {error}");
+                    eprintln!("Could not open Settings: {error}");
                     cx.quit();
                     return;
                 }
             };
-            let mut shell = Shell {
-                service: service.clone(),
-                instance,
-                tray,
-                settings: None,
-                revision: u64::MAX,
-                prompt_visible: false,
-            };
-            // Tray-first: keep the platform alive when Settings closes.
-            if let Err(error) = open_keep_alive(cx) {
-                eprintln!("Could not create the background window: {error}");
-                cx.quit();
-                return;
-            }
-            if smoke_test {
-                shell.open_settings(cx);
-                if shell.settings.is_none() {
-                    panic!("native settings window failed to open during smoke test");
-                }
-            } else {
-                // Scheduled login stays tray-only; a deliberate manual launch
-                // immediately exposes the native settings interface.
-                if !autostart {
-                    shell.open_settings(cx);
-                }
-                service.start();
-            }
+            let _ = handle.update(cx, |_, window, _| window.activate_window());
+            cx.activate(true);
+            // GPUI quits the process when its last window closes, which is
+            // exactly the desired "close, don't hide" behavior here.
+            let guard_events = crate::instance::SettingsGuard::focus_requests();
             cx.spawn(async move |cx| {
-                let started = std::time::Instant::now();
-                let mut smoke_closed = false;
-                let mut smoke_reopened = false;
+                let started = Instant::now();
                 loop {
                     smol::Timer::after(Duration::from_millis(200)).await;
-                    if smoke_test && !smoke_closed && started.elapsed() > Duration::from_secs(2) {
-                        cx.update(|cx| {
-                            shell
-                                .settings
-                                .unwrap()
-                                .update(cx, |_, window, _| window.remove_window())
-                                .expect("smoke window close failed");
-                        })
-                        .expect("app quit after closing Settings instead of staying in tray");
-                        smoke_closed = true;
-                    }
-                    if smoke_test && !smoke_reopened && started.elapsed() > Duration::from_secs(3) {
-                        cx.update(|cx| {
-                            shell.open_settings(cx);
-                            shell
-                                .settings
-                                .unwrap()
-                                .update(cx, |_, _, _| ())
-                                .expect("smoke Settings reopen failed");
-                        })
-                        .expect("tray app did not survive closing Settings");
-                        smoke_reopened = true;
-                    }
-                    if smoke_test && started.elapsed() > Duration::from_secs(5) {
+                    if smoke_test && started.elapsed() > Duration::from_secs(3) {
                         let _ = cx.update(|cx| cx.quit());
                         break;
                     }
-                    if cx.update(|cx| shell.tick(cx)).is_err() {
-                        break;
+                    if guard_events.take() {
+                        let focused = cx.update(|cx| {
+                            handle
+                                .update(cx, |_, window, _| window.activate_window())
+                                .is_ok()
+                        });
+                        if !matches!(focused, Ok(true)) {
+                            break;
+                        }
                     }
                 }
             })
             .detach();
         });
     Ok(())
+}
+
+// ------------------------------------------------------------------ entry ----
+
+pub fn run() -> Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let autostart = args.iter().any(|a| a == "--autostart");
+    let smoke_test = args.iter().any(|a| a == "--smoke-test");
+    let settings = args.iter().any(|a| a == SETTINGS_ARG);
+
+    if settings {
+        // Elevation is not needed: all privileged work happens in the tray.
+        return run_settings(smoke_test);
+    }
+    // Release builds need administrator rights for Dell CCTK. GPUI owns the
+    // executable manifest, so elevate at runtime before taking the mutex.
+    if !cfg!(debug_assertions) && !smoke_test && !crate::elevation::is_elevated() {
+        if crate::elevation::relaunch_elevated(&args) {
+            return Ok(());
+        }
+    }
+    run_tray(autostart, smoke_test)
 }

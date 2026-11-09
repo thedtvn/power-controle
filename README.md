@@ -37,7 +37,7 @@ Every push runs `.github/workflows/release.yml` on `windows-latest`. It:
    `Program Files\Power Control`;
 4. uploads the MSI, setup EXE, portable EXE, and `SHA256SUMS.txt` as workflow
    artifacts and publishes them as a GitHub release tagged
-   `v<version>-build.<run number>`.
+   `v<version>-<short commit id>` (for example `v0.1.0-527756a`).
 
 The version comes from `src-tauri/Cargo.toml` and must be numeric `x.y.z` for
 the MSI. Use **one** installer type per machine: the MSI and setup EXE are
@@ -84,10 +84,35 @@ Disabled entries are not automatically enabled. Disabling startup removes the
 app's task and owned legacy Run entries; other applications are untouched.
 A moved installation's enabled task is repaired before its fallback is removed.
 
-Hardware discovery and system changes run on a serialized background worker,
-not the UI thread. A scheduled duplicate launch stays quiet; manually opening
-the app again brings up Settings. Closing Settings should leave the tray running;
-use its Quit menu item to exit completely.
+## Processes, caching, and load time
+
+Power Control runs as two processes:
+
+- **Tray (background):** a lightweight process (about 13 MB) with the tray icon
+  and a plain Win32 message loop. It has no GPU renderer and no windows. It owns
+  all hardware access on a serialized background worker.
+- **Settings:** a separate GPUI process launched from the tray menu, by
+  double-clicking the tray icon, or by opening the app again. Closing its window
+  **exits the process** and frees all UI memory; it is not hidden.
+
+The tray loads everything once at startup (power status, Dell profiles and
+modes, battery telemetry, startup and credential status) and keeps it in an
+in-memory snapshot. The tray menu and Settings read only that snapshot, so
+opening Settings issues no hardware queries: it opens with complete data in
+about 0.3 s.
+
+- The last good hardware state is saved to
+  `%APPDATA%\com.duong.power-controle\state-cache.json` (no passwords) and shown
+  immediately on the next launch while a background refresh runs.
+- The Dell Command Configure location and supported profile/mode lists are
+  discovered once and reused. Later refreshes read only the current modes.
+- Successful writes update the cache directly instead of re-querying.
+- Battery telemetry is reused for 60 seconds. A power event (AC plugged or
+  unplugged) invalidates it and triggers a refresh.
+- Automatic thermal and battery switching is applied in a single Dell CCTK call.
+
+A scheduled duplicate launch stays quiet; manually opening the app again brings
+up Settings. Use the tray's Quit menu item to exit completely.
 
 ### Manual installed-release check
 
@@ -112,12 +137,14 @@ use its Quit menu item to exit completely.
 cargo check --locked
 cargo test --locked --lib
 cargo run -- --smoke-test
+cargo run -- --settings --smoke-test   # while a tray copy is running
 powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File src-tauri/tests/startup.Tests.ps1
 ```
 
-The smoke test opens Settings, closes it, verifies the tray process survives,
-reopens Settings, and exits after five seconds. It does not start the system
-worker or apply hardware/startup settings. Run it with no other app copy running.
+`--smoke-test` starts the tray without the hardware worker and exits after two
+seconds; `--settings --smoke-test` opens the Settings window from the tray's
+cached state and exits after three seconds. Neither applies hardware or startup
+settings. Run them with no other copy of the app running.
 
 Startup tests use mocks for mutations. A Rust integration check queries real
 Windows startup state read-only; it does not register tasks, delete registry

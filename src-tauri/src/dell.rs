@@ -253,7 +253,7 @@ impl std::error::Error for DellError {}
 // State exposed to frontend
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DellState {
     pub available: bool,
     pub current_profile: Option<ThermalProfile>,

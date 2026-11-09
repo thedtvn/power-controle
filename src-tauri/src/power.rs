@@ -84,7 +84,7 @@ pub fn loading_icon() -> &'static [u8] {
 // Status (exposed to frontend)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Status {
     pub active_scheme: PowerScheme,
     pub power_source: String,

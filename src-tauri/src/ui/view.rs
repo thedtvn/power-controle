@@ -17,7 +17,8 @@ use crate::{
     config::Config,
     dell::{BatteryChargeMode, ThermalProfile},
     power::PowerScheme,
-    service::{Action, Service, Snapshot},
+    service::{Action, Snapshot},
+    settings_client::Service,
 };
 
 use super::{components, theme};
