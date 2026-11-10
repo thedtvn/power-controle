@@ -24,5 +24,6 @@
 Thumbs.db
 desktop.ini
 
-# Local scratch
+# Local scratch and WiX extension cache
 /.omo/
+/.wix/

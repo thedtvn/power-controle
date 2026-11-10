@@ -1,5 +1,9 @@
-<!-- WiX v5 per-machine MSI. Program Files is required for elevated startup. -->
-<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+<!-- WiX v5 per-machine MSI with a folder-selection step.
+     Build requires the UI extension: wix extension add WixToolset.UI.wixext/5.0.2
+     Elevated "Start with Windows" only works when installed under Program Files;
+     the app refuses it elsewhere for security, so the default stays there. -->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
   <Package Name="Power Control" Manufacturer="duong" Version="$(var.Version)"
            UpgradeCode="6F1D3C52-8E0B-4A7A-9C55-2B7E4D9A1F30" Scope="perMachine">
     <MajorUpgrade DowngradeErrorMessage="A newer version of Power Control is already installed." />
@@ -7,11 +11,34 @@
 
     <Icon Id="AppIcon" SourceFile="$(var.IconPath)" />
     <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+    <!-- Shows the chosen folder in Apps & Features. -->
+    <SetProperty Id="ARPINSTALLLOCATION" Value="[INSTALLFOLDER]" After="CostFinalize" />
+
+    <!-- Upgrades and repairs reuse the folder chosen at first install. -->
+    <Property Id="INSTALLFOLDER">
+      <RegistrySearch Id="PreviousInstallFolder" Root="HKLM" Key="Software\PowerControl"
+                      Name="InstallFolder" Type="raw" />
+    </Property>
+
+    <!-- Welcome -> License-free folder picker -> Ready -> Progress -> Finish.
+         WIXUI_INSTALLDIR names the directory the "Change..." button edits. -->
+    <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
+    <!-- WixUI_InstallDir shows a license page by default; skip it. -->
+    <UI>
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="InstallDirDlg"
+               Order="2" Condition="NOT Installed" />
+      <Publish Dialog="InstallDirDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg"
+               Order="2" />
+    </UI>
 
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="Power Control">
         <Component Id="MainExecutable">
           <File Id="PowerControlExe" Source="$(var.ExePath)" Name="power-controle.exe" KeyPath="yes" />
+        </Component>
+        <Component Id="InstallFolderRegistry">
+          <RegistryValue Root="HKLM" Key="Software\PowerControl" Name="InstallFolder"
+                         Type="string" Value="[INSTALLFOLDER]" KeyPath="yes" />
         </Component>
       </Directory>
     </StandardDirectory>
@@ -30,6 +57,7 @@
 
     <Feature Id="Main" Title="Power Control">
       <ComponentRef Id="MainExecutable" />
+      <ComponentRef Id="InstallFolderRegistry" />
       <ComponentRef Id="StartMenuShortcut" />
     </Feature>
   </Package>

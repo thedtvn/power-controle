@@ -32,7 +32,7 @@ Every push runs `.github/workflows/release.yml` on `windows-latest`. It:
 
 1. runs Rust tests and the mocked startup tests;
 2. builds `power-controle.exe` in release mode;
-3. packages a per-machine **MSI** (WiX 5, `installer/power-control.wxs`) and a
+3. packages a per-machine **MSI** (WiX 5, `installer/power-control.wxs`, with an install-folder picker) and a
    **setup EXE** (NSIS, `installer/power-control.nsi`), both installing to
    `Program Files\Power Control`;
 4. uploads the MSI, setup EXE, portable EXE, and `SHA256SUMS.txt` as workflow
@@ -48,7 +48,8 @@ To build installers locally after `cargo build --release --locked`:
 ```powershell
 makensis /DVERSION=0.1.0 installer/power-control.nsi
 dotnet tool install --global wix --version 5.0.2
-wix build installer/power-control.wxs -arch x64 -d Version=0.1.0 -d ExePath=$PWD\target\release\power-controle.exe -d IconPath=$PWD\src-tauri\icons\icon.ico -o target\release\Power-Control-0.1.0-x64.msi
+wix extension add --global WixToolset.UI.wixext/5.0.2
+wix build installer/power-control.wxs -arch x64 -ext WixToolset.UI.wixext -d Version=0.1.0 -d ExePath=$PWD\target\release\power-controle.exe -d IconPath=$PWD\src-tauri\icons\icon.ico -o target\release\Power-Control-0.1.0-x64.msi
 ```
 
 Before updating or uninstalling, quit the running copy using its tray menu;
