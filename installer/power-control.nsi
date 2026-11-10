@@ -18,7 +18,16 @@ SetCompressor /SOLID lzma
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "English"
 
+; A running copy (tray or Settings) locks the exe and keeps the old build in
+; memory, so stop it before replacing files. It runs elevated; terminate it.
+!macro StopRunningApp
+    nsExec::Exec '"$SYSDIR\taskkill.exe" /F /T /IM power-controle.exe'
+    Pop $0
+    Sleep 500
+!macroend
+
 Section "Power Control" SEC_MAIN
+    !insertmacro StopRunningApp
     SetShellVarContext all
     SetOutPath "$INSTDIR"
     File "..\target\release\power-controle.exe"
@@ -36,6 +45,7 @@ Section "Uninstall"
     MessageBox MB_OKCANCEL|MB_ICONINFORMATION "Before uninstalling, disable Start with Windows and quit Power Control using its tray menu. Settings and BIOS credentials are retained." IDOK proceed
     Abort
     proceed:
+    !insertmacro StopRunningApp
     SetShellVarContext all
     Delete "$SMPROGRAMS\Power Control\Power Control.lnk"
     RMDir "$SMPROGRAMS\Power Control"

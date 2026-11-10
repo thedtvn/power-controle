@@ -48,12 +48,12 @@ To build installers locally after `cargo build --release --locked`:
 ```powershell
 makensis /DVERSION=0.1.0 installer/power-control.nsi
 dotnet tool install --global wix --version 5.0.2
-wix extension add --global WixToolset.UI.wixext/5.0.2
-wix build installer/power-control.wxs -arch x64 -ext WixToolset.UI.wixext -d Version=0.1.0 -d ExePath=$PWD\target\release\power-controle.exe -d IconPath=$PWD\src-tauri\icons\icon.ico -o target\release\Power-Control-0.1.0-x64.msi
+wix extension add --global WixToolset.UI.wixext/5.0.2 WixToolset.Util.wixext/5.0.2
+wix build installer/power-control.wxs -arch x64 -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext -d Version=0.1.0 -d ExePath=$PWD\target\release\power-controle.exe -d IconPath=$PWD\src-tauri\icons\icon.ico -o target\release\Power-Control-0.1.0-x64.msi
 ```
 
-Before updating or uninstalling, quit the running copy using its tray menu;
-disable Start with Windows before uninstalling. Uninstalling keeps user
+Both installers stop a running copy before replacing files, and the MSI replaces any earlier build of the same version instead of installing beside it. Disable Start with Windows
+before uninstalling. Uninstalling keeps user
 settings and saved Credential Manager entries.
 
 ## Existing settings and credentials

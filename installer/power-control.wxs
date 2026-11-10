@@ -1,12 +1,18 @@
 <!-- WiX v5 per-machine MSI with a folder-selection step.
-     Build requires the UI extension: wix extension add WixToolset.UI.wixext/5.0.2
+     Build requires the extensions:
+       wix extension add WixToolset.UI.wixext/5.0.2 WixToolset.Util.wixext/5.0.2
      Elevated "Start with Windows" only works when installed under Program Files;
      the app refuses it elsewhere for security, so the default stays there. -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
-     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
   <Package Name="Power Control" Manufacturer="duong" Version="$(var.Version)"
            UpgradeCode="6F1D3C52-8E0B-4A7A-9C55-2B7E4D9A1F30" Scope="perMachine">
-    <MajorUpgrade DowngradeErrorMessage="A newer version of Power Control is already installed." />
+    <!-- AllowSameVersionUpgrades: CI rebuilds keep Version=x.y.z, so without this
+         a newer build of the same version installs side-by-side instead of
+         replacing the old one (two "Power Control" entries, old exe kept). -->
+    <MajorUpgrade AllowSameVersionUpgrades="yes"
+                  DowngradeErrorMessage="A newer version of Power Control is already installed." />
     <MediaTemplate EmbedCab="yes" />
 
     <Icon Id="AppIcon" SourceFile="$(var.IconPath)" />
@@ -19,6 +25,13 @@
       <RegistrySearch Id="PreviousInstallFolder" Root="HKLM" Key="Software\PowerControl"
                       Name="InstallFolder" Type="raw" />
     </Property>
+
+    <!-- A running copy keeps the old exe locked, so the update would only take
+         effect after a reboot. Stop it (tray and Settings) before replacing files.
+         It runs elevated, so a polite close request cannot reach it: terminate. -->
+    <util:CloseApplication Id="CloseRunningApp" Target="power-controle.exe"
+                           CloseMessage="no" EndSessionMessage="no" TerminateProcess="1"
+                           RebootPrompt="no" />
 
     <!-- Welcome -> License-free folder picker -> Ready -> Progress -> Finish.
          WIXUI_INSTALLDIR names the directory the "Change..." button edits. -->
